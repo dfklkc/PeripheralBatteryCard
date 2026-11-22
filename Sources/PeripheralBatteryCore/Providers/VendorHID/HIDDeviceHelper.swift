@@ -42,10 +42,11 @@ public enum HIDDeviceHelper {
 
     private final class CaptureContext {
         let matcher: (_ reportID: UInt32, _ bytes: [UInt8]) -> Bool
+        let capacity: Int
         var captured: [UInt8]?
-        var isDone = false
 
-        init(matcher: @escaping (_ reportID: UInt32, _ bytes: [UInt8]) -> Bool) {
+        init(capacity: Int, matcher: @escaping (_ reportID: UInt32, _ bytes: [UInt8]) -> Bool) {
+            self.capacity = capacity
             self.matcher = matcher
         }
     }
@@ -152,50 +153,37 @@ public enum HIDDeviceHelper {
         timeout: TimeInterval = 0.6,
         matcher: @escaping (_ reportID: UInt32, _ bytes: [UInt8]) -> Bool
     ) -> [UInt8]? {
-        guard let runLoop = CFRunLoopGetCurrent() else { return nil }
-        let bufSize = max(expectedInputSize, 64)
-        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufSize)
-        buffer.initialize(repeating: 0, count: bufSize)
+        withOutputInputReportReader(
+            device: device, outputReportID: outputReportID, payload: payload, expectedInputSize: expectedInputSize,
+            timeout: timeout, matcher: matcher
+        ) { read in
+            read()
+        }
+    }
 
-        let context = CaptureContext(matcher: matcher)
-        let ctxPtr = Unmanaged.passRetained(context).toOpaque()
-
-        let callback: IOHIDReportCallback = { rawCtx, result, _, _, reportID, report, reportLength in
-            guard result == kIOReturnSuccess, let rawCtx else { return }
-            let ctx = Unmanaged<CaptureContext>.fromOpaque(rawCtx).takeUnretainedValue()
-            guard !ctx.isDone else { return }
-            let bytes = Array(UnsafeBufferPointer(start: report, count: reportLength))
-            if ctx.matcher(reportID, bytes) {
-                ctx.captured = bytes
-                ctx.isDone = true
+    // Keep one live registration for all requests in a confirmation read.
+    static func withOutputInputReportReader<T>(
+        device: IOHIDDevice, outputReportID: Int, payload: [UInt8], expectedInputSize: Int = 64,
+        timeout: TimeInterval = 0.6, matcher: @escaping (_ reportID: UInt32, _ bytes: [UInt8]) -> Bool,
+        body: (_ read: () -> [UInt8]?) -> T?
+    ) -> T? {
+        withInputReportCapture(device: device, expectedInputSize: expectedInputSize, matcher: matcher) { context in
+            body {
+                if context.captured != nil {
+                    // Drain any queued replies to the previous request before re-arming capture.
+                    CFRunLoopRunInMode(queryRunLoopMode, 0.002, false)
+                }
+                context.captured = nil
+                let result = payload.withUnsafeBytes { rawBuffer -> IOReturn in
+                    guard let bytes = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
+                        return kIOReturnBadArgument
+                    }
+                    return IOHIDDeviceSetReport(device, kIOHIDReportTypeOutput, CFIndex(outputReportID), bytes, payload.count)
+                }
+                guard result == kIOReturnSuccess else { return nil }
+                return waitForInputReport(context, timeout: timeout)
             }
         }
-
-        IOHIDDeviceRegisterInputReportCallback(device, buffer, bufSize, callback, ctxPtr)
-        IOHIDDeviceScheduleWithRunLoop(device, runLoop, queryRunLoopMode.rawValue)
-
-        defer {
-            IOHIDDeviceUnscheduleFromRunLoop(device, runLoop, queryRunLoopMode.rawValue)
-            IOHIDDeviceRegisterInputReportCallback(device, buffer, bufSize, nil, nil)
-            Unmanaged<CaptureContext>.fromOpaque(ctxPtr).release()
-            buffer.deallocate()
-        }
-
-        let setResult = payload.withUnsafeBytes { rawBuf -> IOReturn in
-            guard let base = rawBuf.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-                return kIOReturnBadArgument
-            }
-            return IOHIDDeviceSetReport(device, kIOHIDReportTypeOutput, CFIndex(outputReportID), base, payload.count)
-        }
-        guard setResult == kIOReturnSuccess else {
-            return nil
-        }
-
-        let deadline = Date().addingTimeInterval(timeout)
-        while !context.isDone && Date() < deadline {
-            CFRunLoopRunInMode(queryRunLoopMode, 0.02, false)
-        }
-        return context.captured
     }
 
     /// 被动监听 Input Report（不发送写请求，适用于 Sony DualSense / DualShock 4）
@@ -205,22 +193,31 @@ public enum HIDDeviceHelper {
         timeout: TimeInterval = 0.35,
         matcher: @escaping (_ reportID: UInt32, _ bytes: [UInt8]) -> Bool
     ) -> [UInt8]? {
+        withInputReportCapture(device: device, expectedInputSize: expectedInputSize, matcher: matcher) { context in
+            waitForInputReport(context, timeout: timeout)
+        }
+    }
+
+    private static func withInputReportCapture<T>(
+        device: IOHIDDevice, expectedInputSize: Int,
+        matcher: @escaping (_ reportID: UInt32, _ bytes: [UInt8]) -> Bool,
+        body: (CaptureContext) -> T?
+    ) -> T? {
         guard let runLoop = CFRunLoopGetCurrent() else { return nil }
         let bufSize = max(expectedInputSize, 64)
         let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufSize)
         buffer.initialize(repeating: 0, count: bufSize)
 
-        let context = CaptureContext(matcher: matcher)
+        let context = CaptureContext(capacity: bufSize, matcher: matcher)
         let ctxPtr = Unmanaged.passRetained(context).toOpaque()
 
         let callback: IOHIDReportCallback = { rawCtx, result, _, _, reportID, report, reportLength in
             guard result == kIOReturnSuccess, let rawCtx else { return }
             let ctx = Unmanaged<CaptureContext>.fromOpaque(rawCtx).takeUnretainedValue()
-            guard !ctx.isDone else { return }
+            guard ctx.captured == nil, reportLength > 0, reportLength <= ctx.capacity else { return }
             let bytes = Array(UnsafeBufferPointer(start: report, count: reportLength))
             if ctx.matcher(reportID, bytes) {
                 ctx.captured = bytes
-                ctx.isDone = true
             }
         }
 
@@ -229,13 +226,17 @@ public enum HIDDeviceHelper {
 
         defer {
             IOHIDDeviceUnscheduleFromRunLoop(device, runLoop, queryRunLoopMode.rawValue)
-            IOHIDDeviceRegisterInputReportCallback(device, buffer, bufSize, nil, nil)
+            // IOKit removes a registration by its original context pointer.
+            IOHIDDeviceRegisterInputReportCallback(device, buffer, bufSize, nil, ctxPtr)
             Unmanaged<CaptureContext>.fromOpaque(ctxPtr).release()
             buffer.deallocate()
         }
+        return body(context)
+    }
 
-        let deadline = Date().addingTimeInterval(timeout)
-        while !context.isDone && Date() < deadline {
+    private static func waitForInputReport(_ context: CaptureContext, timeout: TimeInterval) -> [UInt8]? {
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        while context.captured == nil && ProcessInfo.processInfo.systemUptime < deadline {
             CFRunLoopRunInMode(queryRunLoopMode, 0.02, false)
         }
         return context.captured

@@ -38,20 +38,17 @@ public final class YJXChipHIDDriver: HIDVendorDriver, @unchecked Sendable {
         }
 
         guard let reading = HIDDeviceHelper.withOpenDevice(device, body: { opened -> VendorBatteryReading? in
-            let request = Self.buildBatteryRequest()
-            func read() -> VendorBatteryReading? {
-                let frame = HIDDeviceHelper.exchangeOutputInputReport(
-                    device: opened, outputReportID: 0, payload: request, expectedInputSize: 64, timeout: 0.6
-                ) { reportID, bytes in
+            HIDDeviceHelper.withOutputInputReportReader(
+                device: opened, outputReportID: 0, payload: Self.buildBatteryRequest(),
+                matcher: { reportID, bytes in
                     reportID == 0 && Self.isBatteryResponse(bytes)
                 }
-                return frame.flatMap { Self.parseBatteryResponse($0, descriptor: descriptor) }
-            }
-
-            guard let first = read() else { return nil }
-            return Self.confirmReading(first, previous: previous) {
-                Thread.sleep(forTimeInterval: 0.12)
-                return read()
+            ) { read in
+                guard let first = read().flatMap({ Self.parseBatteryResponse($0, descriptor: descriptor) }) else { return nil }
+                return Self.confirmReading(first, previous: previous) {
+                    Thread.sleep(forTimeInterval: 0.12)
+                    return read().flatMap { Self.parseBatteryResponse($0, descriptor: descriptor) }
+                }
             }
         }) else {
             return []

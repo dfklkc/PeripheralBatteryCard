@@ -28,6 +28,8 @@ for arch in arm64 x86_64; do
 done
 lipo -create "${BINARIES[@]}" -output "$MACOS_DIR/PeripheralBatteryCard"
 lipo "$MACOS_DIR/PeripheralBatteryCard" -verify_arch arm64 x86_64
+# Keep local build paths in debug symbols out of public release packages.
+strip -S "$MACOS_DIR/PeripheralBatteryCard"
 
 # 生成矢量级 1024x1024 应用图标并转换为 AppIcon.icns
 ICON_WORK="$ROOT_DIR/.build/icon_tmp"

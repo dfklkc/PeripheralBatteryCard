@@ -27,7 +27,7 @@ for arch in arm64 x86_64; do
   BINARIES+=("$BIN_DIR/PeripheralBatteryCard")
 done
 lipo -create "${BINARIES[@]}" -output "$MACOS_DIR/PeripheralBatteryCard"
-lipo -verify_arch arm64 x86_64 "$MACOS_DIR/PeripheralBatteryCard"
+lipo "$MACOS_DIR/PeripheralBatteryCard" -verify_arch arm64 x86_64
 
 # 生成矢量级 1024x1024 应用图标并转换为 AppIcon.icns
 ICON_WORK="$ROOT_DIR/.build/icon_tmp"

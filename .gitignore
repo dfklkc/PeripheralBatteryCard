@@ -1,0 +1,9 @@
+.build/
+.swiftpm/
+dist/
+.DS_Store
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+*.log
+custom_protocols.json
+diagnostics*.json

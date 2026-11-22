@@ -175,7 +175,7 @@ codesign --verify --deep --strict "$APP_DIR"
 
 ARCHIVE="PeripheralBatteryCard-v$VERSION-macOS-universal.zip"
 rm -f "$DIST_DIR/$ARCHIVE"
-ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$DIST_DIR/$ARCHIVE"
+ditto -c -k --norsrc --noextattr --noqtn --keepParent "$APP_DIR" "$DIST_DIR/$ARCHIVE"
 (cd "$DIST_DIR" && shasum -a 256 "$ARCHIVE" > SHA256SUMS.txt)
 
 echo "==> Built successfully: $APP_DIR and $DIST_DIR/$ARCHIVE"
